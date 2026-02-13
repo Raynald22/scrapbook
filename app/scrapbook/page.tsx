@@ -94,11 +94,11 @@ export default async function ScrapbookPage() {
   return (
     <main className="min-h-screen flex items-center justify-center px-4 py-12 relative overflow-hidden bg-stone-100">
       {/* Background Image - Top Down Grass View */}
-      <img 
+      {/* <img 
         src="https://images.unsplash.com/photo-1558905619-d6f8dd3d5b1d?q=80&w=2000&auto=format&fit=crop" 
         alt="Top Down Grass Texture"
         className="absolute inset-0 w-full h-full object-cover z-0"
-      />
+      /> */}
       {/* Overlay to soften the image slightly */}
       <div className="absolute inset-0 bg-black/5 pointer-events-none z-0"></div>
       
