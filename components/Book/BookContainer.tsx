@@ -572,101 +572,27 @@ export default function BookContainer({ data }: BookContainerProps) {
     return pages;
   }, [bookData]);
 
-  // --- Mobile Page Navigation (Ref-based for performance) ---
+  // --- Mobile Page Navigation (3D flip, ref-based for perf) ---
   const [mobilePageIndex, setMobilePageIndex] = useState(0);
-  const [flipState, setFlipState] = useState<'idle' | 'flipping-next' | 'flipping-prev'>('idle');
-  const touchRef = useRef({ startX: 0, deltaX: 0, swiping: false });
+  const touchRef = useRef({ startX: 0, currentX: 0, swiping: false, startTime: 0, direction: '' as '' | 'next' | 'prev' });
   const flipRef = useRef<HTMLDivElement>(null);
   const shadowRef = useRef<HTMLDivElement>(null);
+  const baseRef = useRef<HTMLDivElement>(null);
+  const [flipTarget, setFlipTarget] = useState<number | null>(null); // which page is shown in flip layer
+  const [baseTarget, setBaseTarget] = useState<number | null>(null); // which page is shown underneath
+  const animatingRef = useRef(false);
 
-  const handleMobileTouchStart = (e: React.TouchEvent) => {
-    if (flipState !== 'idle') return;
-    touchRef.current.startX = e.touches[0].clientX;
-    touchRef.current.deltaX = 0;
-    touchRef.current.swiping = true;
-    
-    // Show the flip layer immediately
+  const showFlipLayer = (angle: number) => {
     if (flipRef.current) {
       flipRef.current.style.display = 'block';
-      flipRef.current.style.transition = 'none';
-      flipRef.current.style.transform = 'rotateY(0deg)';
-    }
-    if (shadowRef.current) {
-      shadowRef.current.style.display = 'block';
-      shadowRef.current.style.opacity = '0';
-    }
-  };
-
-  const handleMobileTouchMove = (e: React.TouchEvent) => {
-    if (!touchRef.current.swiping || flipState !== 'idle') return;
-    const delta = e.touches[0].clientX - touchRef.current.startX;
-    touchRef.current.deltaX = delta;
-    
-    // Directly manipulate DOM — no React re-render
-    if (flipRef.current) {
-      // Swipe left (next page): rotate from 0 to -180
-      // Swipe right (prev page): we'll handle differently  
-      const maxSwipe = viewportW * 0.4;
-      const ratio = Math.max(-1, Math.min(0, delta / maxSwipe));
-      const angle = ratio * 180; // 0 to -180
       flipRef.current.style.transform = `rotateY(${angle}deg)`;
     }
     if (shadowRef.current) {
-      const progress = Math.min(1, Math.abs(delta) / (viewportW * 0.4));
-      shadowRef.current.style.opacity = String(progress * 0.15);
+      shadowRef.current.style.display = 'block';
     }
   };
 
-  const handleMobileTouchEnd = () => {
-    if (!touchRef.current.swiping || flipState !== 'idle') return;
-    touchRef.current.swiping = false;
-    
-    const delta = touchRef.current.deltaX;
-    const threshold = viewportW * 0.12;
-    
-    if (delta < -threshold && mobilePageIndex < allPages.length - 1) {
-      // Commit flip forward
-      setFlipState('flipping-next');
-      if (flipRef.current) {
-        flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
-        flipRef.current.style.transform = 'rotateY(-180deg)';
-      }
-      if (shadowRef.current) {
-        shadowRef.current.style.transition = 'opacity 0.6s';
-        shadowRef.current.style.opacity = '0';
-      }
-    } else if (delta > threshold && mobilePageIndex > 0) {
-      // Commit flip backward  
-      setFlipState('flipping-prev');
-      if (flipRef.current) {
-        flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
-        flipRef.current.style.transform = 'rotateY(-180deg)';
-      }
-      if (shadowRef.current) {
-        shadowRef.current.style.transition = 'opacity 0.6s';
-        shadowRef.current.style.opacity = '0';
-      }
-    } else {
-      // Cancel — snap back
-      if (flipRef.current) {
-        flipRef.current.style.transition = 'transform 0.3s cubic-bezier(0.22, 1, 0.36, 1)';
-        flipRef.current.style.transform = 'rotateY(0deg)';
-      }
-      if (shadowRef.current) {
-        shadowRef.current.style.transition = 'opacity 0.3s';
-        shadowRef.current.style.opacity = '0';
-      }
-    }
-  };
-
-  // Handle flip animation end
-  const handleFlipTransitionEnd = () => {
-    if (flipState === 'flipping-next') {
-      setMobilePageIndex(prev => Math.min(prev + 1, allPages.length - 1));
-    } else if (flipState === 'flipping-prev') {
-      setMobilePageIndex(prev => Math.max(prev - 1, 0));
-    }
-    setFlipState('idle');
+  const hideFlipLayer = () => {
     if (flipRef.current) {
       flipRef.current.style.display = 'none';
       flipRef.current.style.transition = 'none';
@@ -674,78 +600,184 @@ export default function BookContainer({ data }: BookContainerProps) {
     }
     if (shadowRef.current) {
       shadowRef.current.style.display = 'none';
+      shadowRef.current.style.transition = 'none';
+      shadowRef.current.style.opacity = '0';
     }
+  };
+
+  const handleMobileTouchStart = (e: React.TouchEvent) => {
+    if (animatingRef.current) return;
+    const x = e.touches[0].clientX;
+    touchRef.current = { startX: x, currentX: x, swiping: true, startTime: Date.now(), direction: '' };
+  };
+
+  const handleMobileTouchMove = (e: React.TouchEvent) => {
+    if (!touchRef.current.swiping || animatingRef.current) return;
+    touchRef.current.currentX = e.touches[0].clientX;
+    const delta = touchRef.current.currentX - touchRef.current.startX;
+    
+    // Detect direction on first significant move
+    if (touchRef.current.direction === '' && Math.abs(delta) > 8) {
+      if (delta < 0 && mobilePageIndex < allPages.length - 1) {
+        // Swipe left → next page
+        touchRef.current.direction = 'next';
+        setFlipTarget(mobilePageIndex); // flip layer shows current page
+        setBaseTarget(mobilePageIndex + 1); // underneath shows next page
+        showFlipLayer(0);
+      } else if (delta > 0 && mobilePageIndex > 0) {
+        // Swipe right → previous page
+        touchRef.current.direction = 'prev';
+        setFlipTarget(mobilePageIndex - 1); // flip layer shows previous page
+        setBaseTarget(mobilePageIndex); // underneath shows current
+        showFlipLayer(-180);
+      }
+      if (flipRef.current) {
+        flipRef.current.style.transition = 'none';
+      }
+      if (shadowRef.current) {
+        shadowRef.current.style.transition = 'none';
+      }
+    }
+    
+    if (touchRef.current.direction === '' || !flipRef.current) return;
+    
+    const maxSwipe = viewportW * 0.35;
+    
+    if (touchRef.current.direction === 'next') {
+      // Forward: 0° → -180° as finger moves left
+      const progress = Math.min(1, Math.max(0, -delta / maxSwipe));
+      const angle = -progress * 180;
+      flipRef.current.style.transform = `rotateY(${angle}deg)`;
+      if (shadowRef.current) {
+        shadowRef.current.style.opacity = String(progress * 0.2);
+      }
+    } else if (touchRef.current.direction === 'prev') {
+      // Backward: -180° → 0° as finger moves right
+      const progress = Math.min(1, Math.max(0, delta / maxSwipe));
+      const angle = -180 + progress * 180;
+      flipRef.current.style.transform = `rotateY(${angle}deg)`;
+      if (shadowRef.current) {
+        shadowRef.current.style.opacity = String((1 - progress) * 0.2);
+      }
+    }
+  };
+
+  const handleMobileTouchEnd = () => {
+    if (!touchRef.current.swiping || animatingRef.current) return;
+    touchRef.current.swiping = false;
+    
+    const delta = touchRef.current.currentX - touchRef.current.startX;
+    const elapsed = Date.now() - touchRef.current.startTime;
+    const velocity = Math.abs(delta) / Math.max(1, elapsed);
+    const dir = touchRef.current.direction;
+    
+    if (dir === '') return; // No significant swipe
+    
+    const threshold = viewportW * 0.15;
+    const fastSwipe = velocity > 0.3 && Math.abs(delta) > 20;
+    const shouldCommit = Math.abs(delta) > threshold || fastSwipe;
+    
+    animatingRef.current = true;
+    
+    if (flipRef.current) {
+      flipRef.current.style.transition = 'transform 0.45s cubic-bezier(0.22, 1, 0.36, 1)';
+    }
+    if (shadowRef.current) {
+      shadowRef.current.style.transition = 'opacity 0.45s ease-out';
+    }
+    
+    if (shouldCommit && dir === 'next') {
+      // Complete forward flip
+      if (flipRef.current) flipRef.current.style.transform = 'rotateY(-180deg)';
+      if (shadowRef.current) shadowRef.current.style.opacity = '0';
+      setTimeout(() => {
+        setMobilePageIndex(prev => Math.min(prev + 1, allPages.length - 1));
+        setFlipTarget(null);
+        setBaseTarget(null);
+        hideFlipLayer();
+        animatingRef.current = false;
+      }, 460);
+    } else if (shouldCommit && dir === 'prev') {
+      // Complete backward flip
+      if (flipRef.current) flipRef.current.style.transform = 'rotateY(0deg)';
+      if (shadowRef.current) shadowRef.current.style.opacity = '0';
+      setTimeout(() => {
+        setMobilePageIndex(prev => Math.max(prev - 1, 0));
+        setFlipTarget(null);
+        setBaseTarget(null);
+        hideFlipLayer();
+        animatingRef.current = false;
+      }, 460);
+    } else {
+      // Cancel — snap back
+      if (dir === 'next') {
+        if (flipRef.current) flipRef.current.style.transform = 'rotateY(0deg)';
+      } else {
+        if (flipRef.current) flipRef.current.style.transform = 'rotateY(-180deg)';
+      }
+      if (shadowRef.current) shadowRef.current.style.opacity = '0';
+      setTimeout(() => {
+        setFlipTarget(null);
+        setBaseTarget(null);
+        hideFlipLayer();
+        animatingRef.current = false;
+      }, 460);
+    }
+    
+    touchRef.current.direction = '';
   };
 
   // Navigate via page dots
   const goToPage = (target: number) => {
-    if (flipState !== 'idle' || target === mobilePageIndex) return;
-    const direction = target > mobilePageIndex ? 'flipping-next' : 'flipping-prev';
-    setFlipState(direction as 'flipping-next' | 'flipping-prev');
+    if (target === mobilePageIndex || animatingRef.current) return;
+    animatingRef.current = true;
     
-    // Show flip layer and animate
+    const isForward = target > mobilePageIndex;
+    setFlipTarget(isForward ? mobilePageIndex : target);
+    setBaseTarget(isForward ? target : mobilePageIndex);
+    
+    // Show and animate
+    showFlipLayer(isForward ? 0 : -180);
     if (flipRef.current) {
-      flipRef.current.style.display = 'block';
-      flipRef.current.style.transition = 'none';
-      flipRef.current.style.transform = 'rotateY(0deg)';
-      // Force reflow before adding transition
-      void flipRef.current.offsetHeight;
-      flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
-      flipRef.current.style.transform = 'rotateY(-180deg)';
+      void flipRef.current.offsetHeight; // force reflow
+      flipRef.current.style.transition = 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)';
+      flipRef.current.style.transform = isForward ? 'rotateY(-180deg)' : 'rotateY(0deg)';
     }
     if (shadowRef.current) {
-      shadowRef.current.style.display = 'block';
+      shadowRef.current.style.transition = 'opacity 0.5s ease-out';
       shadowRef.current.style.opacity = '0.1';
-      setTimeout(() => {
-        if (shadowRef.current) shadowRef.current.style.opacity = '0';
-      }, 300);
+      setTimeout(() => { if (shadowRef.current) shadowRef.current.style.opacity = '0'; }, 200);
     }
     
-    // Update page after animation
     setTimeout(() => {
       setMobilePageIndex(target);
-      setFlipState('idle');
-      if (flipRef.current) {
-        flipRef.current.style.display = 'none';
-        flipRef.current.style.transition = 'none';
-        flipRef.current.style.transform = 'rotateY(0deg)';
-      }
-      if (shadowRef.current) {
-        shadowRef.current.style.display = 'none';
-      }
-    }, 620);
+      setFlipTarget(null);
+      setBaseTarget(null);
+      hideFlipLayer();
+      animatingRef.current = false;
+    }, 520);
   };
 
   // ==========================================
-  // MOBILE RENDER: Single page with 3D flip
+  // MOBILE RENDER: Single page with 3D book flip
   // ==========================================
   if (isMobile) {
-    // Determine what the "flipping page" and "underneath page" show
-    const underneathIndex = flipState === 'flipping-next' 
-      ? Math.min(mobilePageIndex + 1, allPages.length - 1)
-      : flipState === 'flipping-prev'
-      ? Math.max(mobilePageIndex - 1, 0)
-      : mobilePageIndex;
-
     return (
       <div className="fixed inset-0 w-screen h-[100dvh] bg-[#f5ead6] overflow-hidden flex flex-col">
-        {/* Page Content - Full Screen with 3D perspective */}
+        {/* Page area with 3D perspective */}
         <div 
           className="flex-1 relative overflow-hidden"
-          style={{ perspective: '1200px', perspectiveOrigin: '50% 50%' }}
+          style={{ perspective: '1200px', perspectiveOrigin: 'center center' }}
           onTouchStart={handleMobileTouchStart}
           onTouchMove={handleMobileTouchMove}
           onTouchEnd={handleMobileTouchEnd}
         >
-          {/* Base layer: shows current page (or the target page during flip) */}
-          <div className="absolute inset-0">
-            {flipState !== 'idle' 
-              ? allPages[underneathIndex]?.content
-              : allPages[mobilePageIndex]?.content
-            }
+          {/* Base layer: the page being revealed underneath */}
+          <div ref={baseRef} className="absolute inset-0">
+            {baseTarget !== null ? allPages[baseTarget]?.content : allPages[mobilePageIndex]?.content}
           </div>
 
-          {/* Flip layer: the page that visually flips away */}
+          {/* Flip layer: the page that is flipping (3D rotateY) */}
           <div 
             ref={flipRef}
             className="absolute inset-0 bg-[#f5ead6]"
@@ -756,36 +788,33 @@ export default function BookContainer({ data }: BookContainerProps) {
               willChange: 'transform',
               zIndex: 10,
             }}
-            onTransitionEnd={handleFlipTransitionEnd}
           >
-            {/* Always shows the current page content (the page being flipped away) */}
-            {allPages[mobilePageIndex]?.content}
-            {/* Page edge shadow */}
+            {flipTarget !== null && allPages[flipTarget]?.content}
+            {/* Page fold shadow on right edge */}
             <div 
-              className="absolute top-0 right-0 w-8 h-full pointer-events-none"
-              style={{ 
-                background: 'linear-gradient(to left, rgba(0,0,0,0.08), transparent)',
-              }}
+              className="absolute top-0 right-0 w-12 h-full pointer-events-none"
+              style={{ background: 'linear-gradient(to left, rgba(0,0,0,0.06), transparent)' }}
             />
           </div>
 
-          {/* Shadow/fold effect overlay */}
+          {/* Ambient shadow during flip */}
           <div 
             ref={shadowRef}
             className="absolute inset-0 pointer-events-none"
             style={{
               display: 'none',
-              background: 'linear-gradient(to right, rgba(0,0,0,0.2) 0%, transparent 40%)',
+              background: 'linear-gradient(to right, rgba(0,0,0,0.25) 0%, transparent 50%)',
               zIndex: 20,
               willChange: 'opacity',
+              opacity: 0,
             }}
           />
         </div>
 
         {/* Bottom Navigation Bar */}
-        <div className="flex-shrink-0 bg-[#e8dcc8] border-t border-stone-300/50 px-4 py-2 flex items-center justify-between safe-area-bottom">
-          {/* Page indicator */}
-          <div className="flex items-center gap-1.5 overflow-x-auto max-w-[60%] scrollbar-hide">
+        <div className="flex-shrink-0 bg-[#e8dcc8] border-t border-stone-300/50 px-4 py-2 flex items-center justify-between">
+          {/* Page indicator dots */}
+          <div className="flex items-center gap-1.5 overflow-x-auto max-w-[60%]">
             {allPages.map((_, i) => (
               <button
                 key={i}
@@ -820,6 +849,7 @@ export default function BookContainer({ data }: BookContainerProps) {
       </div>
     );
   }
+
 
   // ==========================================
   // DESKTOP RENDER: FlipBook fills viewport
