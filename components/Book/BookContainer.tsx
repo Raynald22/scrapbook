@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useRef, useEffect } from "react";
+import React, { useMemo, useState, useRef, useEffect } from "react";
 import { ScrapbookData, ScrapbookPage, PageLayout } from "@/lib/types";
 import FlipBook from "@/components/Book/FlipBook";
 import FlipPage from "@/components/Book/FlipPage";
@@ -499,68 +499,352 @@ export default function BookContainer({ data }: BookContainerProps) {
     return generatedSheets;
   }, [bookData]);
 
-  // Dimensions
-  // Page Aspect Ratio is 3:4.
-  // Let height = 700px. Page Width = 525px.
-  // Total Width = 1050px.
-  const bookHeight = 700;
-  const bookWidth = 1050;
+  // --- Viewport & Mobile Detection ---
+  const [isMobile, setIsMobile] = useState(false);
+  const [viewportW, setViewportW] = useState(1050);
+  const [viewportH, setViewportH] = useState(700);
 
-  // Dynamic scale calculation for responsiveness
-  const [scale, setScale] = useState(1);
-  
   useEffect(() => {
-    const updateScale = () => {
+    const update = () => {
       const vw = window.innerWidth;
       const vh = window.innerHeight;
-      
-      // Leave some padding around the book
-      const paddingX = vw < 640 ? 20 : 80; // Less padding on mobile
-      const paddingY = vw < 640 ? 120 : 160; // Space for UI elements
-      
-      const scaleX = (vw - paddingX) / bookWidth;
-      const scaleY = (vh - paddingY) / bookHeight;
-      
-      const newScale = Math.min(scaleX, scaleY, 1); // Never exceed 1
-      setScale(Math.max(newScale, 0.25)); // Never go below 0.25
+      setIsMobile(vw < 768);
+      setViewportW(vw);
+      setViewportH(vh);
     };
-    
-    updateScale();
-    window.addEventListener('resize', updateScale);
-    return () => window.removeEventListener('resize', updateScale);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
   }, []);
 
-  return (
-    <div className="flex flex-col items-center justify-center min-h-screen min-h-[100dvh] w-full overflow-hidden relative">
-      {/* Book Container - dynamically scaled */}
-      <div 
-        className="transition-transform duration-300 origin-center"
-        style={{ transform: `scale(${scale})` }}
-      >
-        <FlipBook width={bookWidth} height={bookHeight}>
-          {sheets.map((sheet, i) => (
-             // @ts-ignore - FlipBook injects props
-            <FlipPage 
-                key={i} 
-                front={sheet.front} 
-                back={sheet.back} 
-                frontClass={sheet.frontClass} 
-                backClass={sheet.backClass}
+  // --- Desktop: Compute book dimensions to fill viewport ---
+  // Page aspect ratio = 3:4 (width:height)
+  // Book = 2 pages side by side = 6:4 = 3:2
+  const desktopBookW = viewportW;
+  const desktopBookH = viewportH;
+
+  // --- Mobile: Flatten all pages into a linear array ---
+  const allPages = useMemo(() => {
+    const pages: { content: React.ReactNode; label: string }[] = [];
+    
+    // Cover
+    pages.push({
+      content: (
+        <div className="w-full h-full">
+          <BookCover title={bookData.title} />
+        </div>
+      ),
+      label: 'Cover'
+    });
+
+    // All content pages from spreads
+    bookData.spreads.forEach((spread) => {
+      pages.push({
+        content: <Page page={spread.leftPage} onUpdate={handleUpdatePage} onLayoutChange={handleLayoutChange} />,
+        label: spread.leftPage.date?.date || 'Page'
+      });
+      if (spread.rightPage) {
+        pages.push({
+          content: <Page page={spread.rightPage} onUpdate={handleUpdatePage} onLayoutChange={handleLayoutChange} />,
+          label: spread.rightPage.date?.date || 'Page'
+        });
+      }
+    });
+
+    // Add Page button
+    pages.push({
+      content: (
+        <div className="w-full h-full bg-[#f5ead6] flex items-center justify-center">
+          <button 
+            onClick={handleAddPage}
+            className="group flex flex-col items-center gap-3 p-8 border-4 border-dashed border-stone-300 rounded-xl hover:border-orange-400 hover:bg-orange-50/50 transition-all cursor-pointer"
+          >
+            <div className="w-16 h-16 rounded-full bg-stone-200 group-hover:bg-orange-200 flex items-center justify-center text-3xl text-stone-500 group-hover:text-orange-600 transition-colors">
+              +
+            </div>
+            <span className="text-stone-400 group-hover:text-orange-600 font-hand text-xl">Add New Page</span>
+          </button>
+        </div>
+      ),
+      label: '+ Add'
+    });
+
+    return pages;
+  }, [bookData]);
+
+  // --- Mobile Page Navigation (Ref-based for performance) ---
+  const [mobilePageIndex, setMobilePageIndex] = useState(0);
+  const [flipState, setFlipState] = useState<'idle' | 'flipping-next' | 'flipping-prev'>('idle');
+  const touchRef = useRef({ startX: 0, deltaX: 0, swiping: false });
+  const flipRef = useRef<HTMLDivElement>(null);
+  const shadowRef = useRef<HTMLDivElement>(null);
+
+  const handleMobileTouchStart = (e: React.TouchEvent) => {
+    if (flipState !== 'idle') return;
+    touchRef.current.startX = e.touches[0].clientX;
+    touchRef.current.deltaX = 0;
+    touchRef.current.swiping = true;
+    
+    // Show the flip layer immediately
+    if (flipRef.current) {
+      flipRef.current.style.display = 'block';
+      flipRef.current.style.transition = 'none';
+      flipRef.current.style.transform = 'rotateY(0deg)';
+    }
+    if (shadowRef.current) {
+      shadowRef.current.style.display = 'block';
+      shadowRef.current.style.opacity = '0';
+    }
+  };
+
+  const handleMobileTouchMove = (e: React.TouchEvent) => {
+    if (!touchRef.current.swiping || flipState !== 'idle') return;
+    const delta = e.touches[0].clientX - touchRef.current.startX;
+    touchRef.current.deltaX = delta;
+    
+    // Directly manipulate DOM — no React re-render
+    if (flipRef.current) {
+      // Swipe left (next page): rotate from 0 to -180
+      // Swipe right (prev page): we'll handle differently  
+      const maxSwipe = viewportW * 0.4;
+      const ratio = Math.max(-1, Math.min(0, delta / maxSwipe));
+      const angle = ratio * 180; // 0 to -180
+      flipRef.current.style.transform = `rotateY(${angle}deg)`;
+    }
+    if (shadowRef.current) {
+      const progress = Math.min(1, Math.abs(delta) / (viewportW * 0.4));
+      shadowRef.current.style.opacity = String(progress * 0.15);
+    }
+  };
+
+  const handleMobileTouchEnd = () => {
+    if (!touchRef.current.swiping || flipState !== 'idle') return;
+    touchRef.current.swiping = false;
+    
+    const delta = touchRef.current.deltaX;
+    const threshold = viewportW * 0.12;
+    
+    if (delta < -threshold && mobilePageIndex < allPages.length - 1) {
+      // Commit flip forward
+      setFlipState('flipping-next');
+      if (flipRef.current) {
+        flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
+        flipRef.current.style.transform = 'rotateY(-180deg)';
+      }
+      if (shadowRef.current) {
+        shadowRef.current.style.transition = 'opacity 0.6s';
+        shadowRef.current.style.opacity = '0';
+      }
+    } else if (delta > threshold && mobilePageIndex > 0) {
+      // Commit flip backward  
+      setFlipState('flipping-prev');
+      if (flipRef.current) {
+        flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
+        flipRef.current.style.transform = 'rotateY(-180deg)';
+      }
+      if (shadowRef.current) {
+        shadowRef.current.style.transition = 'opacity 0.6s';
+        shadowRef.current.style.opacity = '0';
+      }
+    } else {
+      // Cancel — snap back
+      if (flipRef.current) {
+        flipRef.current.style.transition = 'transform 0.3s cubic-bezier(0.22, 1, 0.36, 1)';
+        flipRef.current.style.transform = 'rotateY(0deg)';
+      }
+      if (shadowRef.current) {
+        shadowRef.current.style.transition = 'opacity 0.3s';
+        shadowRef.current.style.opacity = '0';
+      }
+    }
+  };
+
+  // Handle flip animation end
+  const handleFlipTransitionEnd = () => {
+    if (flipState === 'flipping-next') {
+      setMobilePageIndex(prev => Math.min(prev + 1, allPages.length - 1));
+    } else if (flipState === 'flipping-prev') {
+      setMobilePageIndex(prev => Math.max(prev - 1, 0));
+    }
+    setFlipState('idle');
+    if (flipRef.current) {
+      flipRef.current.style.display = 'none';
+      flipRef.current.style.transition = 'none';
+      flipRef.current.style.transform = 'rotateY(0deg)';
+    }
+    if (shadowRef.current) {
+      shadowRef.current.style.display = 'none';
+    }
+  };
+
+  // Navigate via page dots
+  const goToPage = (target: number) => {
+    if (flipState !== 'idle' || target === mobilePageIndex) return;
+    const direction = target > mobilePageIndex ? 'flipping-next' : 'flipping-prev';
+    setFlipState(direction as 'flipping-next' | 'flipping-prev');
+    
+    // Show flip layer and animate
+    if (flipRef.current) {
+      flipRef.current.style.display = 'block';
+      flipRef.current.style.transition = 'none';
+      flipRef.current.style.transform = 'rotateY(0deg)';
+      // Force reflow before adding transition
+      void flipRef.current.offsetHeight;
+      flipRef.current.style.transition = 'transform 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
+      flipRef.current.style.transform = 'rotateY(-180deg)';
+    }
+    if (shadowRef.current) {
+      shadowRef.current.style.display = 'block';
+      shadowRef.current.style.opacity = '0.1';
+      setTimeout(() => {
+        if (shadowRef.current) shadowRef.current.style.opacity = '0';
+      }, 300);
+    }
+    
+    // Update page after animation
+    setTimeout(() => {
+      setMobilePageIndex(target);
+      setFlipState('idle');
+      if (flipRef.current) {
+        flipRef.current.style.display = 'none';
+        flipRef.current.style.transition = 'none';
+        flipRef.current.style.transform = 'rotateY(0deg)';
+      }
+      if (shadowRef.current) {
+        shadowRef.current.style.display = 'none';
+      }
+    }, 620);
+  };
+
+  // ==========================================
+  // MOBILE RENDER: Single page with 3D flip
+  // ==========================================
+  if (isMobile) {
+    // Determine what the "flipping page" and "underneath page" show
+    const underneathIndex = flipState === 'flipping-next' 
+      ? Math.min(mobilePageIndex + 1, allPages.length - 1)
+      : flipState === 'flipping-prev'
+      ? Math.max(mobilePageIndex - 1, 0)
+      : mobilePageIndex;
+
+    return (
+      <div className="fixed inset-0 w-screen h-[100dvh] bg-[#f5ead6] overflow-hidden flex flex-col">
+        {/* Page Content - Full Screen with 3D perspective */}
+        <div 
+          className="flex-1 relative overflow-hidden"
+          style={{ perspective: '1200px', perspectiveOrigin: '50% 50%' }}
+          onTouchStart={handleMobileTouchStart}
+          onTouchMove={handleMobileTouchMove}
+          onTouchEnd={handleMobileTouchEnd}
+        >
+          {/* Base layer: shows current page (or the target page during flip) */}
+          <div className="absolute inset-0">
+            {flipState !== 'idle' 
+              ? allPages[underneathIndex]?.content
+              : allPages[mobilePageIndex]?.content
+            }
+          </div>
+
+          {/* Flip layer: the page that visually flips away */}
+          <div 
+            ref={flipRef}
+            className="absolute inset-0 bg-[#f5ead6]"
+            style={{
+              display: 'none',
+              transformOrigin: 'left center',
+              backfaceVisibility: 'hidden',
+              willChange: 'transform',
+              zIndex: 10,
+            }}
+            onTransitionEnd={handleFlipTransitionEnd}
+          >
+            {/* Always shows the current page content (the page being flipped away) */}
+            {allPages[mobilePageIndex]?.content}
+            {/* Page edge shadow */}
+            <div 
+              className="absolute top-0 right-0 w-8 h-full pointer-events-none"
+              style={{ 
+                background: 'linear-gradient(to left, rgba(0,0,0,0.08), transparent)',
+              }}
             />
-          ))}
-        </FlipBook>
+          </div>
+
+          {/* Shadow/fold effect overlay */}
+          <div 
+            ref={shadowRef}
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              display: 'none',
+              background: 'linear-gradient(to right, rgba(0,0,0,0.2) 0%, transparent 40%)',
+              zIndex: 20,
+              willChange: 'opacity',
+            }}
+          />
+        </div>
+
+        {/* Bottom Navigation Bar */}
+        <div className="flex-shrink-0 bg-[#e8dcc8] border-t border-stone-300/50 px-4 py-2 flex items-center justify-between safe-area-bottom">
+          {/* Page indicator */}
+          <div className="flex items-center gap-1.5 overflow-x-auto max-w-[60%] scrollbar-hide">
+            {allPages.map((_, i) => (
+              <button
+                key={i}
+                onClick={() => goToPage(i)}
+                className={`rounded-full transition-all duration-200 flex-shrink-0 ${
+                  i === mobilePageIndex 
+                    ? 'w-6 h-2 bg-orange-500' 
+                    : 'w-2 h-2 bg-stone-400/50'
+                }`}
+              />
+            ))}
+          </div>
+
+          {/* Page label */}
+          <span className="text-stone-500 text-xs font-hand whitespace-nowrap mx-2">
+            {mobilePageIndex + 1} / {allPages.length}
+          </span>
+
+          {/* Save button */}
+          <button
+            onClick={handleSaveAll}
+            disabled={saveStatus === 'saving'}
+            className={`px-3 py-1.5 rounded-full font-hand text-sm shadow transition-all flex-shrink-0 ${
+              saveStatus === 'saved' 
+                ? "bg-green-100 text-green-700 border border-green-400" 
+                : "bg-white text-stone-700 border border-stone-800 hover:bg-stone-50"
+            }`}
+          >
+            {saveStatus === 'saving' ? '⏳' : saveStatus === 'saved' ? '✨' : '💾 Save'}
+          </button>
+        </div>
       </div>
+    );
+  }
 
-      {/* Hint Text */}
-      <p className="mt-4 sm:mt-6 text-stone-500 text-xs sm:text-sm animate-pulse select-none">
-        {scale < 0.5 ? 'Swipe to flip' : 'Click pages to flip'}
-      </p>
+  // ==========================================
+  // DESKTOP RENDER: FlipBook fills viewport
+  // ==========================================
+  return (
+    <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-stone-100 flex items-center justify-center">
+      {/* FlipBook fills the entire viewport */}
+      <FlipBook width={desktopBookW} height={desktopBookH}>
+        {sheets.map((sheet, i) => (
+           // @ts-ignore - FlipBook injects props
+          <FlipPage 
+              key={i} 
+              front={sheet.front} 
+              back={sheet.back} 
+              frontClass={sheet.frontClass} 
+              backClass={sheet.backClass}
+          />
+        ))}
+      </FlipBook>
 
-      {/* Floating Save Button - responsive sizing */}
+      {/* Floating Save Button */}
       <button
           onClick={handleSaveAll}
           disabled={saveStatus === 'saving'}
-          className={`fixed bottom-4 right-4 sm:bottom-8 sm:right-8 z-50 flex items-center gap-2 sm:gap-3 px-4 sm:px-6 py-2 sm:py-3 rounded-full font-hand text-base sm:text-xl shadow-xl transition-all hover:scale-105 active:scale-95 ${
+          className={`fixed bottom-8 right-8 z-50 flex items-center gap-3 px-6 py-3 rounded-full font-hand text-xl shadow-xl transition-all hover:scale-105 active:scale-95 ${
               saveStatus === 'saved' 
                   ? "bg-green-100 text-green-700 border-2 border-green-400" 
                   : "bg-white text-stone-700 border-2 border-stone-800 hover:bg-stone-50"
@@ -568,17 +852,13 @@ export default function BookContainer({ data }: BookContainerProps) {
       >
           {saveStatus === 'saving' ? (
               <>
-                  <div className="w-4 h-4 sm:w-5 sm:h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
-                  <span className="text-sm sm:text-base">Saving...</span>
+                  <div className="w-5 h-5 border-2 border-stone-400 border-t-transparent rounded-full animate-spin" />
+                  <span>Saving...</span>
               </>
           ) : saveStatus === 'saved' ? (
-              <>
-                  <span>✨ Saved!</span>
-              </>
+              <span>✨ Saved!</span>
           ) : (
-              <>
-                  <span>💾 Save Book</span>
-              </>
+              <span>💾 Save Book</span>
           )}
       </button>
     </div>
