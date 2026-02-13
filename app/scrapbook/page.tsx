@@ -3,19 +3,32 @@ import { scrapbookData } from "@/data/scrapbook";
 import { createClient } from "@supabase/supabase-js";
 import type { ScrapbookData, ScrapbookPage as ScrapbookPageType, ScrapbookSpread } from "@/lib/types";
 
-// Initialize Supabase Client for Server Component
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
 export const revalidate = 0; // Disable cache for now
 
 export default async function ScrapbookPage() {
+
+  let book: ScrapbookData = { ...scrapbookData };
+
+  // Guard: only connect to Supabase if env vars exist (avoids build-time crash on Vercel)
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.warn("⚠️ Supabase env vars not set. Using default data.");
+    return (
+      <main className="min-h-screen flex items-center justify-center px-4 py-12 relative overflow-hidden bg-stone-100">
+        <img src="https://images.unsplash.com/photo-1558905619-d6f8dd3d5b1d?q=80&w=2000&auto=format&fit=crop" alt="Top Down Grass Texture" className="absolute inset-0 w-full h-full object-cover z-0" />
+        <div className="absolute inset-0 bg-black/5 pointer-events-none z-0"></div>
+        <div className="relative z-10 w-full flex justify-center">
+          <BookContainer data={book} />
+        </div>
+      </main>
+    );
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseAnonKey);
   
   // 1. Fetch the Book (Layout Metadata)
-  // For now, we just get the first book or fallback to default
-  let book: ScrapbookData = { ...scrapbookData };
-  
   const { data: books, error: bookError } = await supabase.from('books').select('*').limit(1);
   
   console.log("📚 Fetching Book...");
